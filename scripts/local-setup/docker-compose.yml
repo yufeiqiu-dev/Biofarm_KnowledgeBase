@@ -1,0 +1,39 @@
+# Local Postgres for Biofarm.
+#
+# Pinned to 16 to match what RDS will run — a version drift between local and
+# deployed is the kind of thing that only shows up as a production-only bug.
+#
+#   up:     docker compose -f <this file> up -d
+#   reset:  docker compose -f <this file> down -v     (drops all data)
+#
+# There are no migrations in this project; the backend recreates tables on boot
+# via Base.metadata.create_all. `down -v` is therefore the supported way to pick
+# up a model change that alters an existing table.
+
+# Explicit project name so the volume is biofarm_biofarm-pgdata regardless of
+# which directory the file is invoked from.
+name: biofarm
+
+services:
+  db:
+    image: postgres:16
+    container_name: biofarm-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: biofarm
+      POSTGRES_PASSWORD: biofarm
+      POSTGRES_DB: oasis
+    ports:
+      # Host side only. If 5432 is taken by another Postgres, change the left
+      # number here and match it in DATABASE_URL.
+      - "5432:5432"
+    volumes:
+      - biofarm-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U biofarm -d oasis"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  biofarm-pgdata:
