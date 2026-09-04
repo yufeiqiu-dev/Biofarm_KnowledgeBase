@@ -6,6 +6,10 @@ from botocore.exceptions import ClientError
 
 CALLS = []
 
+# Set to a method name to make that call raise ExpiredToken, so the
+# short-lived-credential path (ada, SSO, assume-role) can be exercised.
+RAISE_EXPIRED_ON = None
+
 
 def _err(code):
     return ClientError({"Error": {"Code": code}})
@@ -44,6 +48,8 @@ class _Client:
 
     def _respond(self, method, kwargs):
         n, m = self._name, method
+        if RAISE_EXPIRED_ON and m == RAISE_EXPIRED_ON:
+            raise _err("ExpiredToken")
         if (n, m) == ("sts", "get_caller_identity"):
             return {"Account": "123456789012", "Arn": "arn:aws:iam::123456789012:user/tester"}
         if (n, m) == ("s3", "head_bucket"):

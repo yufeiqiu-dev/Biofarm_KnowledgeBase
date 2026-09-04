@@ -20,6 +20,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+
 def find_workspace_root(start: Path) -> Path:
     """Find the directory holding both app repos.
 
@@ -266,6 +267,56 @@ def check_env_files(r: Report) -> None:
             r.add(OK, "stripe bypass", f"both {b}")
 
 
+AWS_IDENTITY_SNIPPET = (
+    "import json,sys\n"
+    "try:\n"
+    "    import boto3\n"
+    "    i = boto3.Session().client('sts').get_caller_identity()\n"
+    "    print(json.dumps({'ok': True, 'account': i['Account'], 'arn': i['Arn']}))\n"
+    "except Exception as e:\n"
+    "    print(json.dumps({'ok': False, 'error': f'{type(e).__name__}: {e}'}))\n"
+)
+
+
+def check_aws_credentials(r: Report) -> None:
+    """Report which AWS account the current credentials resolve to.
+
+    Only needed for provisioning, not for running an already-configured app, so
+    a miss is a WARN. It is worth surfacing because credentials from a vending
+    tool are short-lived and silently point at whichever account was last
+    selected - provisioning into the wrong account is easy and annoying to undo.
+    """
+    if which("aws"):
+        _, ver = run(["aws", "--version"])
+        r.add(OK, "aws cli", ver.split()[0] if ver else "present")
+
+    # boto3 and the AWS CLI share one credential chain, so either interpreter
+    # gives the same answer. Prefer the venv, which is guaranteed to have boto3.
+    venv_py = BACKEND / (".venv/Scripts/python.exe" if os.name == "nt" else ".venv/bin/python")
+    interpreter = str(venv_py) if venv_py.exists() else sys.executable
+
+    code, out = run([interpreter, "-c", AWS_IDENTITY_SNIPPET], timeout=25)
+    if code != 0 or not out:
+        r.add(WARN, "aws credentials", "could not check (boto3 unavailable)", "only needed for provisioning")
+        return
+    try:
+        data = json.loads(out.splitlines()[-1])
+    except (json.JSONDecodeError, IndexError):
+        r.add(WARN, "aws credentials", "could not parse identity check")
+        return
+
+    if data.get("ok"):
+        r.add(OK, "aws credentials", f"account {data['account']} as {data['arn'].rsplit('/', 1)[-1]}")
+        r.add(WARN, "aws account check", f"provisioning would target {data['account']} - confirm that is the right one")
+    else:
+        r.add(
+            WARN,
+            "aws credentials",
+            data.get("error", "unresolved"),
+            "refresh or set credentials before provisioning; not needed to run an already-configured app",
+        )
+
+
 def check_ports(r: Report) -> None:
     for port, who in ((8000, "backend"), (5174, "frontend")):
         if port_is_free(port):
@@ -298,6 +349,7 @@ def main() -> int:
     check_repos(r)
     check_deps(r)
     check_env_files(r)
+    check_aws_credentials(r)
     check_ports(r)
     check_running(r)
 

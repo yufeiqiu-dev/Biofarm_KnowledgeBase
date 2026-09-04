@@ -71,6 +71,17 @@ CACHE_POLICY_CACHING_OPTIMIZED = "658327ea-f89d-4fab-a63d-7e88639e58f6"
 
 IMAGE_KEY_PREFIX = "products"
 
+# Raised when short-lived credentials (ada, SSO, assume-role) lapse mid-run.
+# Worth naming explicitly so the failure reads as "refresh and re-run" rather
+# than as a bug in provisioning.
+EXPIRED_CREDENTIAL_CODES = {
+    "ExpiredToken",
+    "ExpiredTokenException",
+    "RequestExpired",
+    "InvalidClientTokenId",
+    "UnrecognizedClientException",
+}
+
 
 # --------------------------------------------------------------------------
 # output helpers
@@ -694,8 +705,13 @@ def main() -> int:
         identity = session.client("sts").get_caller_identity()
     except (NoCredentialsError, ClientError) as e:
         sys.exit(
-            f"Could not authenticate to AWS: {e}\n"
-            "Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, or pass --profile."
+            f"Could not authenticate to AWS: {e}\n\n"
+            "boto3 reads the same credential chain the AWS CLI does, so whatever\n"
+            "vends your credentials (ada, aws sso login, static keys) works here too:\n"
+            "  - env vars:      export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...\n"
+            "  - named profile: --profile <name>, or export AWS_PROFILE=<name>\n"
+            "If credentials were vended a while ago, they may simply have expired -\n"
+            "refresh them and run this again."
         )
 
     account_id = identity["Account"]
@@ -729,18 +745,31 @@ def main() -> int:
     iam = session.client("iam")
     cognito = session.client("cognito-idp", region_name=region)
 
-    ensure_bucket(s3, bucket, region, [args.frontend_origin], log, args.dry_run)
-    oac_id = ensure_oac(cf, f"{args.project}-images-oac", log, args.dry_run)
-    dist_id, dist_domain = ensure_distribution(cf, bucket, region, oac_id, state, log, args.dry_run)
-    ensure_bucket_policy(s3, bucket, account_id, dist_id, log, args.dry_run)
-    access_key_id, secret_key = ensure_iam_user(iam, iam_user, bucket, state, log, args.dry_run)
+    try:
+        ensure_bucket(s3, bucket, region, [args.frontend_origin], log, args.dry_run)
+        oac_id = ensure_oac(cf, f"{args.project}-images-oac", log, args.dry_run)
+        dist_id, dist_domain = ensure_distribution(cf, bucket, region, oac_id, state, log, args.dry_run)
+        ensure_bucket_policy(s3, bucket, account_id, dist_id, log, args.dry_run)
+        access_key_id, secret_key = ensure_iam_user(iam, iam_user, bucket, state, log, args.dry_run)
 
-    pool_id = ensure_user_pool(cognito, pool_name, log, args.dry_run)
-    client_id = ensure_app_client(cognito, pool_id, client_name, callbacks, log, args.dry_run)
-    domain = ensure_domain(cognito, pool_id, domain_prefix, region, log, args.dry_run)
-    ensure_admin_group(cognito, pool_id, log, args.dry_run)
-    if args.admin_email:
-        ensure_admin_user(cognito, pool_id, args.admin_email, args.admin_password, log, args.dry_run)
+        pool_id = ensure_user_pool(cognito, pool_name, log, args.dry_run)
+        client_id = ensure_app_client(cognito, pool_id, client_name, callbacks, log, args.dry_run)
+        domain = ensure_domain(cognito, pool_id, domain_prefix, region, log, args.dry_run)
+        ensure_admin_group(cognito, pool_id, log, args.dry_run)
+        if args.admin_email:
+            ensure_admin_user(cognito, pool_id, args.admin_email, args.admin_password, log, args.dry_run)
+    except ClientError as e:
+        code = e.response["Error"]["Code"]
+        if code not in EXPIRED_CREDENTIAL_CODES:
+            raise
+        # Vended credentials are short-lived, and a full run can outlast them.
+        # Every step is check-then-create, so refreshing and re-running resumes
+        # from here rather than duplicating what already succeeded.
+        sys.exit(
+            f"\nAWS credentials expired partway through ({code}).\n"
+            "Refresh them and run the same command again - each step checks before\n"
+            "it creates, so the run resumes rather than starting over."
+        )
 
     if args.dry_run:
         print("\nDry run complete - nothing was created. Re-run without --dry-run to apply.\n")

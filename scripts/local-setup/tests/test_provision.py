@@ -152,6 +152,33 @@ with tempfile.TemporaryDirectory() as d:
     check("callback url is the vite dev origin",
           cl["CallbackURLs"] == ["http://localhost:5174/auth/callback"], str(cl["CallbackURLs"]))
 
+print("\n--- credentials expiring mid-run fail cleanly, not with a traceback ---")
+with tempfile.TemporaryDirectory() as d:
+    root = Path(d)
+    (root / "Biofarm_Backend").mkdir()
+    (root / "Biofarm_Frontend").mkdir()
+    pa.ROOT = root
+    pa.BACKEND_ENV = root / "Biofarm_Backend" / ".env"
+    pa.FRONTEND_ENV = root / "Biofarm_Frontend" / ".env"
+    pa.STATE_FILE = root / ".aws-provision-state.json"
+    boto3.CALLS.clear()
+    # Expire partway through, after the bucket exists but before Cognito.
+    boto3.RAISE_EXPIRED_ON = "create_user_pool"
+    sys.argv = ["provision_aws.py", "--region", "us-east-2"]
+    try:
+        pa.main()
+        raised, msg = None, ""
+    except SystemExit as e:
+        raised, msg = e, str(e.code)
+    except Exception as e:  # noqa: BLE001 - the point is that this must not happen
+        raised, msg = e, f"{type(e).__name__}: {e}"
+    finally:
+        boto3.RAISE_EXPIRED_ON = None
+    check("exits via SystemExit, not an unhandled error", isinstance(raised, SystemExit), msg)
+    check("message says credentials expired", "expired" in msg.lower(), msg)
+    check("message says a re-run resumes", "resume" in msg.lower(), msg)
+    check("no half-written state file", not pa.STATE_FILE.exists())
+
 print("\n--- re-run is idempotent for .env (no duplicate keys) ---")
 with tempfile.TemporaryDirectory() as d:
     root = Path(d)
