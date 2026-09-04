@@ -14,7 +14,7 @@ Status legend: `[ ]` not started, `[x]` done and verified.
 
 ## P0-1. The migration chain does not work on a fresh database
 
-- [ ] Squash to a single baseline migration and remove `create_all`
+- [x] Squash to a single baseline migration and remove `create_all` — done in `adc2545`
 
 **What is true today.** Alembic is set up correctly - `alembic/env.py` imports
 `app.models`, sets `target_metadata = Base.metadata`, and overrides
@@ -36,7 +36,7 @@ Against a fresh database, both orderings fail:
 
 | You run | What happens |
 |---|---|
-| `alembic upgrade head` first | Fails at `c09c8c1b08ed`: relation `checkout_sessions` does not exist |
+| `alembic upgrade head` first | Fails in the **first** migration, `55894e29c942`, creating `order_items`: its foreign key targets `product_variants`, which no migration creates. (An earlier draft of this document predicted the failure at `c09c8c1b08ed` on `checkout_sessions`; reproducing it showed the chain breaks a step sooner. Same root cause.) |
 | App first, then `alembic upgrade head` | `create_all` has already built `orders`; the base migration fails creating a table that exists |
 
 This is invisible locally because the dev database has been carried forward by
@@ -70,16 +70,21 @@ python -m pytest app/tests/ -q
 now describe the same database.
 
 **Note for the tests.** `conftest.py` builds its schema with
-`Base.metadata.create_all` against SQLite and patches out the app's own call.
-That stays valid and needs no change - the tests never exercise the migrations.
-Worth knowing, though: your test suite cannot catch a broken migration chain,
-which is exactly why this went unnoticed.
+`Base.metadata.create_all` against SQLite, which stays correct - the tests never
+exercise the migrations. Its three `patch.object(Base.metadata, "create_all")`
+guards were removed, since the lifespan hook no longer calls it and a patch
+against nothing only implies a coupling that has gone.
+
+Worth holding onto: the suite cannot catch a broken migration chain, which is
+exactly why this went unnoticed. If that is ever worth closing, it takes a test
+that runs `alembic upgrade head` against a real Postgres - SQLite will not do,
+because the failure was a foreign key to an absent table.
 
 ---
 
 ## P0-2. Nothing stops the bypass flags from being true in production
 
-- [ ] Add a production guard to `Settings`
+- [x] Add a production guard to `Settings` — done in `adc2545`
 
 `AUTH_BYPASS=true` makes every request without an `Authorization` header a full
 admin. `STRIPE_BYPASS=true` creates orders inline without ever charging a card.
@@ -116,7 +121,7 @@ comes up.
 
 ## P0-3. There is no Dockerfile
 
-- [ ] Add `Biofarm_Backend/Dockerfile` and a `.dockerignore`
+- [x] Add `Biofarm_Backend/Dockerfile` and a `.dockerignore` — done in `adc2545`
 
 App Runner deploys a container image; none exists yet. Requirements:
 
@@ -137,7 +142,7 @@ confirm `/api/v1/health` answers.
 
 ## P1-1. `echo=True` logs every statement to CloudWatch
 
-- [ ] Make SQL echo conditional
+- [x] Make SQL echo conditional — done in `adc2545`
 
 `app/db/session.py` has `create_engine(settings.database_url, echo=True)`. In
 production that writes every SQL statement *and its bound parameters* to
@@ -152,7 +157,7 @@ engine = create_engine(settings.database_url, echo=settings.app_env == "dev")
 
 ## P1-2. The connection pool is not configured for a remote database
 
-- [ ] Add `pool_pre_ping=True` and a `pool_recycle`
+- [x] Add `pool_pre_ping=True` and a `pool_recycle` — done in `adc2545`
 
 Against localhost, a connection lives as long as the process. Against RDS
 through a NAT instance, idle connections get dropped by the database's own
@@ -178,7 +183,7 @@ they are shared with anything else that connects.
 
 ## P1-3. `cleanup_stale_checkout_sessions` runs in the lifespan hook
 
-- [ ] Move it to a scheduled job
+- [x] Move it to `app.jobs.cleanup` — done in `adc2545`; still needs an EventBridge schedule at deploy time
 
 It runs on every process start, so it fires on each deploy, each scale-out, and
 each restart - doing a table scan and a delete at exactly the moment the service
@@ -193,7 +198,7 @@ EventBridge schedule. Remove it from `lifespan` at the same time you remove
 
 ## P1-4. The Stripe webhook reports success when it silently does nothing
 
-- [ ] Fail loudly when the checkout session is missing
+- [x] Fail loudly when the checkout session is missing — done in `adc2545`
 
 `stripe_webhook.py` calls `create_order_from_checkout_session(db, pi.id)` and
 ignores the result. That function returns `None` when no `CheckoutSession` matches
@@ -214,17 +219,15 @@ before deciding to fail.
 
 ## P1-5. `stripe` is the only unpinned dependency
 
-- [ ] Pin it to an exact version
+- [x] Pinned to `stripe==15.6.1` — done in `adc2545`
 
 `requirements.txt` pins all 44 other packages exactly and then has
 `stripe>=7.0.0`. A rebuild months from now can pull a different major version.
-This matters more than usual because `stripe_webhook.py` catches
-`stripe.error.SignatureVerificationError`, and that import path has moved
-between majors - if it disappears, the handler raises `AttributeError` while
-handling an error, on the endpoint that creates orders.
-
-Pin the version you actually test against, and confirm the error class resolves
-under it.
+This mattered more than usual because `stripe_webhook.py` catches
+`stripe.error.SignatureVerificationError` and that import path has moved between
+majors. **Checked:** `>=7.0.0` resolved to 15.6.1, where `stripe.error` survives
+as an alias of `stripe._error`, so the handler was not broken - the risk was a
+future rebuild, not the present. Pinned to the version actually tested.
 
 ---
 
@@ -240,7 +243,7 @@ the Amplify domain exists, which is why the backend is deployed twice.
 
 ## P2-1. The health endpoint does not check the database
 
-- [ ] Split liveness from readiness
+- [x] Split liveness from readiness — done in `adc2545`
 
 `/api/v1/health` returns `{"status": "ok"}` unconditionally. As an App Runner
 health check that means a service with a dead database stays "healthy" and keeps
@@ -277,3 +280,69 @@ keeping.
 6. P1-3 scheduled job, P2-1 health check - alongside the infrastructure work
 7. P1-6 CORS - during the runbook, not before
 8. P2-2 image keys - before the catalog is populated for real
+
+---
+
+## Found while implementing
+
+Three defects that were not in the original survey, each caught by running the
+work rather than reading it.
+
+### P0-4. `pip install -r requirements.txt` fails outright on Windows
+
+- [x] Add a platform marker to `uvloop` — done in `adc2545`
+
+`uvloop==0.22.1` was pinned unconditionally, and uvloop does not support Windows:
+its build refuses with `RuntimeError: uvloop does not support Windows at the
+moment`, and because pip resolves the whole file as a unit, **nothing** installs.
+The documented setup path could not work on a Windows machine.
+
+`uvloop==0.22.1; sys_platform != "win32"` keeps the speedup on Linux, where the
+container runs, and lets Windows install everything else. Environment markers are
+the intended mechanism for exactly this.
+
+### P0-5. The test suite inherited the developer's `.env`
+
+- [x] Pin the configuration in `conftest.py` — done in `adc2545`
+
+`Settings` reads `Biofarm_Backend/.env`, and the tests construct it like anything
+else. So the suite's behaviour depended on an untracked local file:
+`AUTH_BYPASS=true` turned every "unauthenticated request is rejected" test from
+pass to fail, and `STRIPE_BYPASS=true` changed which code path created an order.
+Tests whose result depends on a file that is not in the repository are not tests,
+and CI would have disagreed with every developer's machine.
+
+`conftest.py` now sets the whole configuration through `os.environ` above the app
+imports - environment variables outrank the `.env` file in pydantic-settings, and
+`get_settings()` is `lru_cache`d so the first import wins.
+
+This surfaced three tests that could not pass under either configuration. Two
+were only failing on the inherited settings. The third,
+`test_create_payment_intent_success`, patched `create_payment_intent` but not
+`calculate_tax`: with bypass off it attempted a live Stripe Tax call and got a
+502, and with bypass on its own final assertion (`order_id is None`) contradicted
+inline order creation. It had no configuration in which it could pass.
+
+### P1-7. A fresh Windows clone would produce a broken container
+
+- [x] Add `.gitattributes` forcing LF — done in `f0fbde7`
+
+The entrypoint is stored with LF, but Windows defaults `core.autocrlf` to true,
+so a fresh clone checks it out as `#!/bin/sh`. Docker bakes that in, and the
+container dies with `no such file or directory` naming an entrypoint that plainly
+exists - because the kernel is looking for an interpreter called `/bin/sh`.
+
+Nothing was broken yet; the local working copy had LF, which is why the build
+succeeded. It would have broken on the next clone, with an error that points
+nowhere near the cause.
+
+---
+
+## Remaining
+
+- **P1-6** `CORS_ORIGINS` - deliberately deferred; it cannot be set until the
+  Amplify domain exists. Phase 5 of the runbook.
+- **P2-2** image key collisions - still open. Worth doing before the catalog is
+  populated for real.
+- **P1-3** the cleanup job exists as `python -m app.jobs.cleanup`, but still needs
+  an EventBridge schedule pointing at it. Phase 2 of the runbook.
