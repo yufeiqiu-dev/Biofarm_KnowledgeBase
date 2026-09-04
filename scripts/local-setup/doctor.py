@@ -267,6 +267,12 @@ def check_env_files(r: Report) -> None:
             r.add(OK, "stripe bypass", f"both {b}")
 
 
+AWS_CLI_FALLBACK_PATHS = [
+    r"C:\Program Files\Amazon\AWSCLIV2\aws.exe",
+    "/usr/local/bin/aws",
+    "/opt/homebrew/bin/aws",
+]
+
 AWS_IDENTITY_SNIPPET = (
     "import json,sys\n"
     "try:\n"
@@ -286,9 +292,23 @@ def check_aws_credentials(r: Report) -> None:
     tool are short-lived and silently point at whichever account was last
     selected - provisioning into the wrong account is easy and annoying to undo.
     """
-    if which("aws"):
-        _, ver = run(["aws", "--version"])
+    aws_exe = which("aws")
+    if aws_exe:
+        _, ver = run([aws_exe, "--version"])
         r.add(OK, "aws cli", ver.split()[0] if ver else "present")
+    else:
+        # A just-installed CLI is on the machine PATH but not in an already-open
+        # shell, which reads as "not installed" and sends people round in circles.
+        installed = next(
+            (p for p in AWS_CLI_FALLBACK_PATHS if Path(p).exists()), None
+        )
+        if installed:
+            r.add(
+                WARN,
+                "aws cli",
+                f"installed at {installed} but not on this shell's PATH",
+                "open a new terminal; nothing here requires the CLI either way",
+            )
 
     # boto3 and the AWS CLI share one credential chain, so either interpreter
     # gives the same answer. Prefer the venv, which is guaranteed to have boto3.
