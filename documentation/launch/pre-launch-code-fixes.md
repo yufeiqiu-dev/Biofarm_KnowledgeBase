@@ -257,7 +257,7 @@ expensive - it runs continuously.
 
 ## P2-2. Image keys collide after a middle image is deleted
 
-- [ ] Switch to non-reusable image keys
+- [x] Switched to non-reusable image keys - done in `01dfffb`
 
 S3 keys are `products/{product_id}/{index}.{ext}` where
 `index = len(image_urls) + 1`. Delete the second of three images and the next
@@ -328,21 +328,226 @@ inline order creation. It had no configuration in which it could pass.
 - [x] Add `.gitattributes` forcing LF — done in `f0fbde7`
 
 The entrypoint is stored with LF, but Windows defaults `core.autocrlf` to true,
-so a fresh clone checks it out as `#!/bin/sh`. Docker bakes that in, and the
+so a fresh clone checks it out as `#!/bin/sh
+`. Docker bakes that in, and the
 container dies with `no such file or directory` naming an entrypoint that plainly
-exists - because the kernel is looking for an interpreter called `/bin/sh`.
+exists - because the kernel is looking for an interpreter called `/bin/sh
+`.
 
 Nothing was broken yet; the local working copy had LF, which is why the build
 succeeded. It would have broken on the next clone, with an error that points
 nowhere near the cause.
 
+## P2-2, closed
+
+Keys are now `products/{product_id}/{uuid4().hex[:12]}.{ext}`. Nothing depended
+on the index — ordering is the position within `image_urls`, and deletion
+resolves the key back out of the URL — so `_url_to_key` and the delete path were
+unchanged. `index` came out of the presign response; the frontend declared it in
+its type and never read it.
+
+**Verified against the real bucket**, because this is a bug no unit test can
+prove absent: three uploads, delete the middle one, upload a fourth, then fetch
+the third back through CloudFront and confirm it still returns its own bytes.
+Under the old scheme the fourth upload computed index 3 and overwrote it.
+
+---
+
+# Second pass
+
+The first pass was infrastructure-shaped: migrations, a Dockerfile, a production
+guard. This one is the application itself — a read of every backend service and
+endpoint and every frontend page. Most of what it found is invisible in
+development, because development runs with both bypasses on, one user, and no
+concurrency.
+
+## S0-1. Access tokens were not bound to the app client
+
+- [x] Verify `client_id` — done in `57f62de`
+
+`app/dependencies/auth.py` checked the signature, `iss` and `token_use`, and
+stopped. A Cognito **access** token carries no `aud` claim at all — the app
+client it was issued to is in `client_id` — so `verify_aud: False` was correct
+and left nothing verifying the audience. Any access token minted by any other
+app client in the same user pool was accepted, including one added later for an
+unrelated service with different scopes. AWS lists this alongside `iss` and
+`token_use` as a required verification step.
+
+`COGNITO_USER_POOL_CLIENT_ID` is optional so an existing `.env` still boots, and
+required under `APP_ENV=prod` by the guard already in `Settings`.
+
+**The trap when deploying:** it must match the frontend's
+`VITE_COGNITO_USER_POOL_CLIENT_ID` exactly. If they disagree, every
+authenticated request returns 401 *"Token was not issued for this application"* —
+including every one that used to work.
+
+## S0-2. Two copies of the token verification
+
+- [x] Collapsed to one `_verify_access_token` — done in `57f62de`
+
+`_verify_admin_token` and `_verify_user_token` were the same four checks copied,
+differing only in the trailing group assertion. That is exactly how a check
+tightened on one path stays loose on the other — and it is why S0-1 could be
+applied once rather than twice. The group read also became `or []`: Cognito omits
+`cognito:groups` for a user in no groups, but a null claim would have made
+`"Admin" in None` raise and turn a 403 into a 500.
+
+`PyJWKClient` gained a timeout. It had none, so a JWKS endpoint that accepts a
+connection and then stalls pinned a worker thread indefinitely.
+
+## S0-3. `confirm_upload` accepted any URL
+
+- [x] Require the product's own CloudFront prefix — done in `57f62de`
+
+`payload.image_url` went into `product.image_urls` verbatim, and that list is
+rendered on the public product page. Admin-only, but the result is an arbitrary
+off-domain URL in the storefront — and an unrecoverable one, since `_url_to_key`
+returns `None` for anything outside the CloudFront domain, so the delete path
+could never clean it up.
+
+## S1-1. Money crossed the API in two different shapes
+
+- [x] One `Money` alias emitting JSON numbers — done in `01dfffb` / `a92272c`
+
+Order amounts were typed `Decimal`, which pydantic encodes as a JSON **string**;
+product prices were typed `float` and came out as numbers. The frontend declared
+both `number`. TypeScript cannot check that at runtime, and it worked only
+because roughly fifteen call sites had accumulated a defensive `Number(...)` and
+the rest happened to use `*`, which coerces. The first `total_amount.toFixed(2)`
+written without the wrapper would have thrown in front of a customer.
+
+`Money` keeps `Decimal` inside the application — the columns are `Numeric(10, 2)`
+and a binary float has no business in a total — and serializes to a number. The
+`max_digits`/`decimal_places` bounds also close the input side: a price with more
+precision than the column can hold is now a 422 rather than a silent rounding by
+the database.
+
+Worth knowing: pydantic parses a JSON float from the literal's own text rather
+than round-tripping through a binary float, so `19.99` from the admin editor
+arrives as `Decimal("19.99")` and passes `decimal_places=2`. There is a test
+pinning that, because if it ever changed every product save would 422.
+
+## S1-2. `order_number` collided under concurrency
+
+- [x] Retry on conflict — done in `01dfffb`
+
+`max + 1` over a unique column is a read-then-write race. Two checkouts landing
+together read the same maximum and the second insert violated the constraint,
+surfacing as a 500 on a request whose card was already authorized: charged, with
+no order, and only a traceback to say so.
+
+Retrying re-reads the maximum, so the loser takes the next number. Chosen over a
+database sequence because it needs no migration and behaves the same on the
+SQLite engine the tests use. It distinguishes a conflict on
+`stripe_payment_intent_id`, which retrying would only bury.
+
+## S1-3. A malformed webhook payload retried forever
+
+- [x] Catch `ValueError` → 400 — done in `01dfffb`
+
+`stripe_webhook.py` caught only `SignatureVerificationError`. `construct_event`
+also raises `ValueError` for a body that is not valid JSON, which became a 500 —
+and a 500 is precisely what tells Stripe to retry. An unparseable payload was
+replayed for the entire retry schedule.
+
+The same handler called `stripe.PaymentMethod.retrieve` directly, which
+`CLAUDE.md` explicitly warns against: it sidesteps `stripe_bypass` and removes
+the seam the tests patch. It is now `stripe_service.get_card_details`.
+
+## S1-4. Checkout had no idempotency key
+
+- [x] Derive one from the buyer, cart, destination and amount — done in `01dfffb`
+
+`POST /orders/payment-intent` places a hold on the customer's card and is
+trivially retried — a double-clicked Pay button, a network retry, a browser
+replay. Each retry opened a second PaymentIntent: two holds against one basket,
+and only one of them ever voided or captured.
+
+## S2-1. A fetch race in the admin order list
+
+- [x] Cleanup flag, loading derived — done in `a92272c`
+
+`AdminOrdersPage`'s effect had no cleanup, so switching tabs quickly left two
+requests in flight and whichever answered last won. Clicking through Confirmed,
+Shipped, Delivered could leave you looking at Confirmed's orders under the
+Delivered tab, with nothing on screen to suggest it. The regression test was
+checked against the unfixed code and fails there.
+
+## S2-2. `apiRequest` had no deadline
+
+- [x] `AbortController` deadline, plus config validation — done in `a92272c`
+
+A backend that accepts the connection and then stops answering left the page on
+its loading state forever — no error, no way back short of a reload. Separately,
+an unset `VITE_API_BASE_URL` resolved every path against the string `"undefined"`,
+which presents as a total backend outage with nothing pointing at configuration;
+it now fails loudly at load. And `console.error` of full error bodies is gone —
+in production that is the customer's console.
+
+## S2-3. Smaller
+
+- [x] A tag name of `"   "` passed `min_length=1` and was then stripped to empty
+      by the service, storing a name nothing can match or display
+- [x] The admin order list's `status` parameter shadowed the fastapi `status`
+      module, which is why that one function hardcoded `400` where every sibling
+      uses the constant
+- [x] The image DELETE route was registered only at `"/"`, so a call without the
+      trailing slash earned a 307 — and a redirected cross-origin DELETE needs
+      its own preflight. Both paths are served now, so the two repos need not
+      deploy together
+- [x] The boto3 S3 client was rebuilt on every presign, confirm and delete, each
+      one re-parsing the full service model
+- [x] CORS asked for `allow_credentials` with wildcard method and header lists,
+      for an API authenticated entirely by bearer token
+- [x] `CartSideBarContext` rebuilt its context value every render and memoized no
+      handlers, so every cart consumer re-rendered on any provider change
+- [x] Frontend lint: 8 errors and 1 warning to zero, none by suppression
+
+## S2-4. The test fixture was concealing bugs rather than catching them
+
+- [x] Join with `create_savepoint` — done in `01dfffb`
+
+Found while writing a test for S1-2, and the most important thing in this pass.
+
+`conftest.py`'s `db_session` bound a `Session` straight to a connection with an
+open transaction, so application-level `commit()` and `rollback()` acted on that
+outer transaction directly. A service that rolled back destroyed everything the
+test had already committed. Every assertion after a rollback was therefore
+reading a state the code never produced — the order-number retry *appeared* to
+succeed, because the row it should have collided with had been erased by its own
+rollback.
+
+The fix is `join_transaction_mode="create_savepoint"`, plus taking `BEGIN` over
+from pysqlite: that driver opens transactions implicitly and will not emit one
+for `SAVEPOINT`, so without it the savepoint silently does nothing and data leaks
+between tests instead. This also removed the `SAWarning: transaction already
+deassociated from connection` the suite had been emitting all along — which in
+hindsight was the symptom, sitting in the output of every run.
+
+**Worth generalising:** a rollback path cannot be tested under a fixture that
+rolls back the same transaction the code does, and it fails by quietly agreeing
+with you.
+
 ---
 
 ## Remaining
 
-- **P1-6** `CORS_ORIGINS` - deliberately deferred; it cannot be set until the
+- **P1-6** `CORS_ORIGINS` — deliberately deferred; it cannot be set until the
   Amplify domain exists. Phase 5 of the runbook.
-- **P2-2** image key collisions - still open. Worth doing before the catalog is
-  populated for real.
 - **P1-3** the cleanup job exists as `python -m app.jobs.cleanup`, but still needs
   an EventBridge schedule pointing at it. Phase 2 of the runbook.
+- **Stock is not reserved between checkout and confirm.** Deliberate. Stock is
+  validated at checkout and again at confirm, so two customers can both buy the
+  last unit and the second fails at confirm — after their card is authorized. The
+  admin gets a 400 naming the item, and cancelling voids the authorization, so
+  nobody is charged. A reservation would need a column, a release on every
+  abandonment path, and a sweeper reliable enough that a missed release does not
+  silently lose stock. Not worth that before launch at this volume, with a person
+  in the fulfilment loop. Revisit if the catalog starts moving faster than one.
+
+## Test counts
+
+|  | before | after first pass | after second pass |
+|---|---|---|---|
+| Backend | 102 | 116 | 176 |
+| Frontend | 35 | 35 | 51 |

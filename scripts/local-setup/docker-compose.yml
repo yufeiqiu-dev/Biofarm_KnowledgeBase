@@ -6,9 +6,14 @@
 #   up:     docker compose -f <this file> up -d
 #   reset:  docker compose -f <this file> down -v     (drops all data)
 #
-# There are no migrations in this project; the backend recreates tables on boot
-# via Base.metadata.create_all. `down -v` is therefore the supported way to pick
-# up a model change that alters an existing table.
+# The schema is owned by Alembic. After starting this, apply it:
+#
+#   cd Biofarm_Backend && .venv/Scripts/python.exe -m alembic upgrade head
+#
+# The backend no longer builds tables on boot - Base.metadata.create_all was
+# removed once the migration chain was squashed to a single baseline, because two
+# mechanisms owning one schema is what let them silently diverge. `down -v` drops
+# the volume and is the way to start over from nothing.
 
 # Explicit project name so the volume is biofarm_biofarm-pgdata regardless of
 # which directory the file is invoked from.

@@ -147,6 +147,14 @@ docker push <acct>.dkr.ecr.us-east-2.amazonaws.com/biofarm-backend:latest
       password, plus the Cognito, S3, and CloudFront values from Phase 2.
       With `APP_ENV=prod` the guard from P0-2 refuses to start if the bypass
       flags are wrong - that is the point.
+- [ ] **`COGNITO_USER_POOL_CLIENT_ID` must be set, and must equal the frontend's
+      `VITE_COGNITO_USER_POOL_CLIENT_ID` exactly.** The backend rejects any access
+      token that was not issued to this app client (S0-1). Under `APP_ENV=prod`
+      the service will not boot without it - deliberately, because unset means
+      the check is skipped and a token from any app client in the pool is
+      accepted. If the two values disagree the service comes up healthy and every
+      authenticated request answers 401 *"Token was not issued for this
+      application"*, which reads like a broken login rather than a typo.
 - [ ] Deployment runs `alembic upgrade head` from the entrypoint. Watch the logs
       and confirm it applied rather than skipped.
 - [ ] **Record the App Runner default domain.** It is the API base URL the

@@ -16,6 +16,7 @@ error naming the field, before any request is served.
 | `DATABASE_URL` | yes | Local: `postgresql+psycopg://biofarm:biofarm@localhost:5432/oasis` for the compose file. Must use the `psycopg` (v3) driver — plain `postgresql://` picks psycopg2, which is not installed. |
 | `COGNITO_REGION` | yes | Region of the user pool, e.g. `us-east-2`. |
 | `COGNITO_USER_POOL_ID` | yes | Cognito → User pools → your pool → *User pool ID* (`us-east-2_XXXXXXXXX`). |
+| `COGNITO_USER_POOL_CLIENT_ID` | dev: optional<br>prod: **yes** | The same value as the frontend's `VITE_COGNITO_USER_POOL_CLIENT_ID`. The backend rejects any access token that was not issued to this app client. Leave it unset and that check is skipped, which is why `Settings` refuses to boot without it under `APP_ENV=prod`. If the two repos disagree, every authenticated request answers 401 with *"Token was not issued for this application"*. |
 | `AWS_REGION` | yes | Region of the S3 bucket. Normally the same as `COGNITO_REGION`. |
 | `S3_BUCKET_NAME` | yes | S3 → your bucket name. |
 | `CLOUDFRONT_URL` | yes | CloudFront → Distributions → *Distribution domain name*, prefixed with `https://`. No trailing slash — the code strips one, but the stored image URLs are built from this so changing it later orphans existing images. |
