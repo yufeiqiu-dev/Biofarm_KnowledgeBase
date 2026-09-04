@@ -118,16 +118,38 @@ def check_python(r: Report) -> None:
         r.add(FAIL, "python", detail, "install Python 3.11+ (winget install Python.Python.3.13)")
 
 
+NODE_FALLBACK_PATHS = [
+    r"C:\Program Files\nodejs\node.exe",
+    "/usr/local/bin/node",
+    "/opt/homebrew/bin/node",
+]
+
+
 def check_node(r: Report) -> None:
-    if not which("node"):
-        r.add(
-            FAIL,
-            "node",
-            "not on PATH",
-            "winget install OpenJS.NodeJS.LTS, then open a NEW terminal (PATH is not refreshed in this one)",
-        )
+    node = which("node")
+    if not node:
+        # Installed-but-invisible is the common case right after `winget
+        # install`, because PATH is not refreshed in an already-open shell.
+        # Reporting a flat "not installed" here sends people off to reinstall
+        # something they already have.
+        installed = next((p for p in NODE_FALLBACK_PATHS if Path(p).exists()), None)
+        if installed:
+            r.add(
+                WARN,
+                "node",
+                f"installed at {installed} but not on this shell's PATH",
+                "open a new terminal - npm scripts spawn `node` and will fail until you do",
+            )
+        else:
+            r.add(
+                FAIL,
+                "node",
+                "not installed",
+                "winget install OpenJS.NodeJS.LTS, then open a NEW terminal (PATH is not refreshed in this one)",
+            )
         return
-    _, out = run(["node", "--version"])
+
+    _, out = run([node, "--version"])
     major = parse_major(out)
     if major is not None and major < 20:
         r.add(WARN, "node", f"{out} (project targets 20+)", "winget upgrade OpenJS.NodeJS.LTS")
