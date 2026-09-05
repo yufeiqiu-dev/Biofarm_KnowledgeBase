@@ -3,9 +3,46 @@
 Taking Biofarm from "runs on a laptop" to "runs on a fresh AWS account", in the
 order the dependencies actually allow.
 
-Read `pre-launch-code-fixes.md` first. Phases 3 onward assume the P0 items there
-are done - in particular, the migration chain does not currently work against a
-fresh database, and RDS will be a fresh database.
+> **Superseded in part, and worth reading anyway.**
+>
+> Phases 2 to 5 described creating the network, database, backend and frontend by
+> hand in the console. That is now `Biofarm_Infra`, a Python CDK repository:
+> five stacks, 120 tests that run offline, and a `README.md` carrying the deploy
+> order. Follow that repository for the *how*.
+>
+> What is still worth reading here is the *why* and the traps - the ordering
+> constraints, the circular dependency between `CORS_ORIGINS` and
+> `VITE_API_BASE_URL`, the Stripe webhook secret being per environment and per
+> mode, and the collected gotchas at the end. None of that changed by being
+> expressed in CDK.
+>
+> Also still current: everything about Stripe, the go-live checklist, and
+> rollback. CDK creates infrastructure; it does not create a Stripe webhook
+> endpoint or put your user in the `Admin` group.
+
+The pre-launch code fixes in `pre-launch-code-fixes.md` are **done** - both
+passes. The migration chain now applies to an empty database, and CI proves that
+on every change by running `alembic upgrade head` against a fresh Postgres.
+
+## Where things stand
+
+| | |
+|---|---|
+| Backend | 194 tests, container builds and boots, migrations verified against an empty database |
+| Frontend | 57 tests, lint and build clean |
+| Infrastructure | 5 CDK stacks, 120 tests, **nothing deployed yet** |
+| CI | GitHub Actions in both application repositories, OIDC, no access keys |
+| Branches | `exp` -> `staging` -> `main`, with `staging` and `main` deploying |
+| Stripe | test mode verified end to end locally: authorize at checkout, capture at ship, refund on cancel after ship |
+
+Open before production, none of them code:
+
+- **Stripe Tax returns $0.00** - no registrations configured. A Dashboard setting,
+  and a genuine launch blocker.
+- **Cognito email** is capped near 50 messages a day from a no-reply AWS address.
+  Fine for staging; needs SES before real customers.
+- **Custom domain and certificate** - staging runs on the default Amplify and App
+  Runner domains.
 
 ## Target architecture
 
