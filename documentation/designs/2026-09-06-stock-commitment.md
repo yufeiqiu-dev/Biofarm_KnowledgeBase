@@ -1,6 +1,6 @@
 # When stock is committed
 
-**Status:** approved, not yet implemented
+**Status:** implemented
 **Repository affected:** `Biofarm_Backend` only. No schema change, no migration.
 
 ## The problem
@@ -108,6 +108,33 @@ duplicated order, so anything recoverable must be swallowed deliberately.
 
 Creation and cancellation get one implementation of the lock-and-sort discipline
 rather than copies drifting apart.
+
+## What implementing it turned up
+
+**The lock did not work, and the suite could not tell.** `_take_stock` locks each
+row with `Session.get(..., with_for_update=True)` — correct on the face of it, and
+the whole suite was green. Against real Postgres, eight concurrent buyers racing
+for one unit produced **six orders**.
+
+The cause is that `create_order` loads the variants before it takes stock, so they
+are already in the session's identity map. `Session.get` will take the lock and
+leave those already-loaded attributes untouched: every buyer waited properly for
+the lock and then deducted from the value it had read *before* waiting. The row
+was locked and the read was stale, which is precisely the lost update the lock
+exists to prevent.
+
+The fix is `populate_existing=True` alongside `with_for_update`, forcing a re-read
+under the lock. Its absence looks like nothing — there is no missing call to spot,
+and the code reads as correct.
+
+SQLite ignores `FOR UPDATE` entirely, so no amount of running `app/tests/` would
+ever have shown this. The suite now asserts that both arguments are passed, which
+is the most it can honestly do; `scripts/check_stock_race.py` is the check that
+actually proves it, and it needs Postgres. It is deliberately not part of the
+suite.
+
+Worth stating plainly: this bug was introduced *by this change* and caught only
+because the fix was exercised against the database it will actually run on.
 
 ## Consequences
 
