@@ -1,0 +1,156 @@
+# When stock is committed
+
+**Status:** approved, not yet implemented
+**Repository affected:** `Biofarm_Backend` only. No schema change, no migration.
+
+## The problem
+
+Stock is read at checkout and deducted at admin-confirm, and nothing holds it in
+between.
+
+`initiate_checkout` (`app/api/v1/endpoints/orders.py:110`) checks that every
+variant has enough stock, then creates a manual-capture PaymentIntent and saves a
+`CheckoutSession`. The check takes no lock and reserves nothing — it is a
+courtesy, not a guarantee. The deduction happens much later, in
+`confirm_order_admin` (`app/services/order_service.py:286`), which *is* correctly
+row-locked and sorted.
+
+So two customers can both pass the check for the last vial, both authorise their
+cards, and both reach `awaiting_fulfillment`. The admin confirms the first; the
+second raises `ValueError` and surfaces as a bare 400.
+
+**The window is not milliseconds.** It runs from payment until an admin happens
+to click confirm — hours, or over a weekend, days.
+
+### What keeps it from being severe
+
+`capture_method="manual"`, and `admin_orders.py:199` voids the authorisation for
+any order before `shipped`. Nobody is wrongly charged: the loser's card carries a
+hold that is released. The real costs are a customer told "sold out" after they
+believed they had bought it, and an admin given a 400 with no guidance.
+
+### Why fix it anyway
+
+Not because of the race — at this volume two people contending for the same last
+vial is vanishingly unlikely. The defect is that **stock moves at an arbitrary
+human moment**. An admin clicking confirm on a Tuesday is what currently decides
+whether inventory moves, which makes the system hard to reason about and lands
+the failure on the person least able to do anything about it.
+
+## What was considered
+
+**Reserve at payment-intent time with a TTL** — the textbook answer, and what
+Shopify and Ticketmaster-style checkouts do. The loser is blocked *before* paying.
+Rejected: it buys a reservation lifecycle, a short sweeper, and a "your cart
+expired" experience, and it holds inventory for everyone who abandons at the card
+form. Over-built for this shop.
+
+**Leave the timing; make the failure graceful** — a better admin error and
+one-click cancel-and-void. Rejected as insufficient: it dresses up the symptom and
+leaves the arbitrary-moment problem in place.
+
+**Accept the order and backorder it** — closest to how reagent suppliers actually
+behave, since multi-week lead times are unremarkable in this industry. Rejected
+for now only because it needs a new order state and therefore a migration. Worth
+revisiting; see "Later".
+
+## The design
+
+The invariant changes from
+
+> stock moves when an admin confirms
+
+to
+
+> **an order that exists holds its stock, from creation until cancellation.**
+
+Everything below follows from that one sentence.
+
+### 1. `create_order` deducts
+
+Both the webhook path (`create_order_from_checkout_session`) and the bypass path
+(`initiate_checkout`) funnel through `create_order`, so this is the only place the
+deduction needs to go.
+
+It aggregates demand per variant before validating — a cart can legitimately hold
+two line items for the same variant, and per-item checks miss combined overstock —
+then takes stock row-locked, in sorted variant order. That is the discipline
+`confirm_order_admin` already uses, moved rather than reinvented: the lock makes
+the read and write one atomic step, and the sort stops two concurrent
+transactions taking the same rows in opposite orders and deadlocking.
+
+If any variant is short it raises `ValueError`, and no order is created.
+
+### 2. `confirm_order_admin` stops deducting
+
+It becomes: check the status, set `confirmed`. It can no longer fail on stock,
+which is the admin-facing symptom being fixed.
+
+### 3. `cancel_order`'s restore becomes unconditional
+
+Today it restores only from `confirmed`, `shipped` and `delivered`. Since every
+order that exists now holds stock, and the function already rejects an
+already-cancelled order, the condition disappears entirely.
+
+### 4. The webhook must not 500 on a shortage
+
+The delicate part. If `create_order` raises inside
+`create_order_from_checkout_session` and that propagates, Stripe receives a 500
+and retries with backoff for days — each retry failing the same way — while the
+authorisation stays live until it expires.
+
+Instead the webhook catches it, voids the PaymentIntent, deletes the checkout
+session, logs at error, and returns 200. This mirrors the reasoning already
+recorded next to `send_order_confirmation`: a non-200 to Stripe is a retried,
+duplicated order, so anything recoverable must be swallowed deliberately.
+
+### 5. Shared helpers
+
+Creation and cancellation get one implementation of the lock-and-sort discipline
+rather than copies drifting apart.
+
+## Consequences
+
+**The customer who loses.** Their hold is voided and no order exists, so
+`OrderSuccessPage` polls `/orders/by-payment-intent/{pi}`, finds nothing, and
+falls back to its existing timeout message — honest, but vague about why.
+Deliberately left alone here so this change stays one thing; see "Later".
+
+**Existing orders straddle the change.** Two orders currently sit at
+`awaiting_fulfillment`, created under the old rule with their stock never
+deducted. After the change, confirming one deducts nothing and cancelling one
+*returns* stock that was never taken — inventory is overstated either way.
+
+Decided: **left as-is.** They are development test data, and staging is expected
+to be wiped before launch. This is a known-wrong state, recorded here rather than
+discovered later. Any environment carrying real orders would need a one-off
+reconciliation before this ships.
+
+**Safety stock remains the cheapest mitigation** and needs no code: holding a
+buffer back — the site reads 0 while two remain — absorbs races, miscounts and
+breakage together, and at this volume does more real work than any of the above.
+
+## Tests
+
+Several existing tests encode the old contract and are rewritten, not deleted:
+`test_admin_confirm_order_deducts_stock`, `test_admin_ship_order_captures_no_stock_change`,
+and `test_stock_locking.py` in full — its scenarios move from confirm to creation.
+
+New coverage:
+
+- deduction happens on both creation paths (webhook and bypass)
+- insufficient stock at creation leaves no order behind
+- the webhook returns 200, voids the intent, and deletes the session on a shortage
+- confirm never changes stock, and cannot fail on it
+- cancelling from `awaiting_fulfillment` restores
+- duplicate line items for one variant aggregate at creation
+- two buyers, one vial: the second fails at creation rather than at confirm
+
+## Later
+
+Not part of this change, recorded so they are decisions rather than oversights:
+
+- **Backorder instead of void.** Give the losing order a state that carries a lead
+  time, matching how the industry actually behaves. Needs a migration.
+- **Tell the customer what happened.** The success-page fallback is currently the
+  same message for "the webhook is slow" and "you did not get it".
