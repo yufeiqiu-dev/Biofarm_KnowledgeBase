@@ -139,9 +139,21 @@ because the fix was exercised against the database it will actually run on.
 ## Consequences
 
 **The customer who loses.** Their hold is voided and no order exists, so
-`OrderSuccessPage` polls `/orders/by-payment-intent/{pi}`, finds nothing, and
-falls back to its existing timeout message — honest, but vague about why.
-Deliberately left alone here so this change stays one thing; see "Later".
+`OrderSuccessPage` polls `/orders/by-payment-intent/{pi}` and finds nothing.
+
+This was first recorded here as falling back to a message that was "honest, but
+vague about why". That was wrong, and reading the page rather than remembering it
+would have shown so. On timeout it rendered a green tick, **"Order Placed!"** and
+"Your payment was successful", told the customer to look in My Orders for
+something that would never arrive, and emptied their cart on the way — four
+false statements and the loss of the only state that would have let them try
+again. Not vague; the opposite of true.
+
+Fixed in the frontend as a follow-up: the timed-out case is now its own state
+that says the order could not be confirmed, covers both possible causes -
+because the browser genuinely cannot tell a slow webhook from a sold-out item -
+and says plainly that no charge has been taken if it was the latter. The cart is
+cleared when an order is confirmed rather than on arrival, so it survives.
 
 **Existing orders straddle the change.** Two orders currently sit at
 `awaiting_fulfillment`, created under the old rule with their stock never
@@ -179,5 +191,5 @@ Not part of this change, recorded so they are decisions rather than oversights:
 
 - **Backorder instead of void.** Give the losing order a state that carries a lead
   time, matching how the industry actually behaves. Needs a migration.
-- **Tell the customer what happened.** The success-page fallback is currently the
-  same message for "the webhook is slow" and "you did not get it".
+- ~~**Tell the customer what happened.**~~ Done, as a follow-up: see "The
+  customer who loses" above.
