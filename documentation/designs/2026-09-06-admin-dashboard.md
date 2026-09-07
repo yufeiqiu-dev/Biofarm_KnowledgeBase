@@ -13,7 +13,38 @@ sidebar links straight to `/admin/products`, `/admin/orders` and `/admin/tags`.
 So this is not only a new feature, it fills a hole anyone hits by typing the
 obvious URL.
 
-## The complication: "revenue" is not one number
+## Revised: Stripe owns the money, we own the work
+
+The first version of this section designed a Collected/Committed split. That was
+half wrong, and the question "doesn't Stripe already have a money dashboard?"
+is what exposed it.
+
+**Stripe is authoritative and we cannot beat it.** Anything computed from our own
+`orders` table is a *belief* about money that drifts from Stripe for real
+reasons: `total_amount` is list price while Stripe's figure is net of fees;
+partial refunds and disputes happen in Stripe and never touch our rows; a capture
+can fail after we have marked an order shipped. A tile reading "Collected: $950"
+that disagrees with the Stripe dashboard is worse than no tile - the admin now
+distrusts both and reconciles by hand.
+
+**So Collected is dropped.** What survives is the one number Stripe genuinely
+cannot produce: Stripe knows PaymentIntents, not that order #7633247686 is
+awaiting fulfilment, holds three vials of Anti-Tau, and has been waiting 29
+hours. That join lives only in our database.
+
+That number is the **value of goods awaiting fulfilment** - the to-do list,
+priced. It answers "is today's queue an afternoon or ten minutes", which is an
+operations question, not an accounting one. It therefore belongs inside "Needs
+you now" rather than in a money section of its own, and it is stated pre-tax:
+sales tax is not the shop's, and a payout figure is Stripe's job.
+
+A link out to the Stripe dashboard covers everything else, and stops anyone
+reading our number as authoritative.
+
+Dropping Collected also removes the ambiguity the section below spends its length
+explaining. It is kept for the record.
+
+## The complication that made "revenue" ambiguous
 
 Checkout authorises; the money is captured at ship time (`capture_method="manual"`).
 So an order's amount means different things depending on where it is:
@@ -85,19 +116,42 @@ The reason to open the page.
 - **Invisible products** — products with no variant. `list_public_products`
   filters those out, so they are silently unbuyable and nothing currently says so.
 
-### 2. Money — **deferred**
+### 2. Money — one figure, inside the queue
 
-Collected and Committed, tax on its own line, average order value. Designed above
-and deliberately not built yet: the queue and the volume figures are what a
-single admin opens the page for, and the money split is worth landing on its own
-once those are in use.
+The value of goods awaiting confirmation and fulfilment, pre-tax, beside the
+counts it prices. Plus a link to the Stripe dashboard for anything that is
+actually about money.
 
-The reasoning above stands unchanged for when it is picked up. Nothing in the
-first version forecloses it - the endpoint gains fields, not a different shape.
+Not a section of its own, and no Collected, tax line or average order value -
+see "Stripe owns the money" above.
+
+**Known gap:** even this is our belief. Stripe holds an authorisation for about
+seven days; if one expires, our order still reads `awaiting_fulfillment` and we
+still count it. Arguably useful - an expired authorisation on an unshipped order
+is exactly what an admin needs to chase - but nothing detects it today. Its own
+piece of work.
 
 ### 3. Volume
 
-Order counts over the same windows, and top products by units sold over 30 days.
+Order counts over the same windows, top products by units sold over 30 days, and
+a 30-day chart carrying two series:
+
+- **daily orders**, as bars — the rhythm, which is what tells one person when to
+  block out fulfilment time
+- **cumulative orders**, as a line — the growth curve, counted from the shop's
+  first order rather than from the window's start, so it shows where the business
+  actually is rather than restarting every month
+
+Two scales in one frame, labelled on both sides. Dual axes deserve their bad
+reputation when they invite a false comparison between series; here the series
+are the same quantity at two aggregations, and the alternative - two charts of
+one variable - costs more space than it earns on a page whose job is a glance.
+
+**Inline SVG, no charting library.** Bars and a polyline over a date axis is
+about thirty lines. A library earns its weight when axes, tooltips, zoom and
+legends are needed; none are here, and the lightest credible option would still
+be among the heaviest things in the bundle, on the page most likely to be left
+open all day.
 
 Top products reads `OrderItem.product_name` and `quantity`, which are
 denormalised on the item — so the figures survive a product being renamed,
@@ -130,8 +184,8 @@ it is half a feature.
 
 ## Deliberately not in this version
 
-- **A revenue trend chart.** With two orders it would be a flat line and pure
-  decoration. Worth adding once the data has a shape.
+- **A revenue chart.** The order chart above is volume only. Revenue over time is
+  Stripe's, for the reasons in "Stripe owns the money".
 - **Products with no images.** They render a placeholder rather than breaking,
   so it is cosmetic next to a product nobody can buy at all.
 - **Anything per-customer.** There is no cohort to analyse yet.
