@@ -1,6 +1,6 @@
 # The admin dashboard
 
-**Status:** approved, not yet implemented
+**Status:** approved; money section deferred by decision (see below)
 **Repositories affected:** `Biofarm_Backend` (one endpoint, one setting), `Biofarm_Frontend` (one page, one route). No schema change, no migration.
 
 ## Why
@@ -56,6 +56,8 @@ Windows are therefore computed **server-side in a fixed business timezone**, fro
 a new `BUSINESS_TIMEZONE` setting. One zone, not the viewer's: the number should
 be the same on a laptop, a phone, and from a hotel in another country.
 
+`BUSINESS_TIMEZONE` is **`America/New_York`**.
+
 - **today** — midnight to now, in that zone
 - **last 7 days** / **last 30 days** — calendar days including today, so it is
   consistent with `today` rather than mixing calendar and rolling windows
@@ -72,15 +74,26 @@ The reason to open the page.
 - **To ship** — count of `confirmed`
 - **In transit** — count of `shipped`, informational
 - **Low stock** — variants at or below a threshold, **listed** rather than
-  counted, because the admin's next action is to reorder a specific thing
+  counted, because the admin's next action is to reorder a specific thing.
+
+  The threshold is 5, which is not a new number: `productSummary.ts` already uses
+  `LOW_STOCK_THRESHOLD = 5` to decide when the storefront says "5 left" in its
+  low-stock tone. The admin and the shop must not disagree about what "low"
+  means, so the backend owns the value and returns it in the payload rather than
+  the dashboard keeping a second copy to drift.
 - **Out of stock** — variants at zero
 - **Invisible products** — products with no variant. `list_public_products`
   filters those out, so they are silently unbuyable and nothing currently says so.
 
-### 2. Money
+### 2. Money — **deferred**
 
-Collected and Committed, each over today / 7d / 30d / all time. Tax collected on
-its own line. Average order value.
+Collected and Committed, tax on its own line, average order value. Designed above
+and deliberately not built yet: the queue and the volume figures are what a
+single admin opens the page for, and the money split is worth landing on its own
+once those are in use.
+
+The reasoning above stands unchanged for when it is picked up. Nothing in the
+first version forecloses it - the endpoint gains fields, not a different shape.
 
 ### 3. Volume
 
@@ -100,7 +113,7 @@ server-side paging precisely so the console stops fetching every order; a
 dashboard that pulled them all down to sum them would walk straight back into
 that, and would do it on the page most likely to be left open.
 
-Roughly six grouped queries — status counts, per-window sums, oldest pending,
+Roughly five grouped queries — status counts, per-window sums, oldest pending,
 low stock, products without variants, and top products.
 `ix_orders_status_created_at` already covers the status-and-date shape.
 
